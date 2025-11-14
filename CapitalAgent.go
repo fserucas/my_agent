@@ -2,8 +2,11 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"io"
 	"log"
+	"net/http"
 	"os"
 	"strings"
 
@@ -36,6 +39,56 @@ func main() {
 
 	type getPopulationCountryArgs struct {
 		Country string `json:"country" jsonschema:"The country to get the population of."`
+	}
+
+	type getTemperatureArgs struct {
+		City string `json:"city" jsonschema:"The capital city to get the temperature of."`
+	}
+
+	var cityCoordinates = map[string]struct{ Lat, Lon float64 }{
+		"paris":  {Lat: 48.85, Lon: 2.35},
+		"tokyo":  {Lat: 35.68, Lon: 139.69},
+		"ottawa": {Lat: 45.42, Lon: -75.69},
+		"lisbon": {Lat: 38.72, Lon: -9.14},
+	}
+
+	type MeteoResponse struct {
+		Current struct {
+			Temperature float64 `json:"temperature_2m"`
+		} `json:"current"`
+	}
+
+	getTemperature := func(ctx tool.Context, args getTemperatureArgs) map[string]any {
+		city := strings.ToLower(args.City)
+		coords, ok := cityCoordinates[city]
+		if !ok {
+			return map[string]any{"result": fmt.Sprintf("Sorry, I don't have coordinates for %s.", args.City)}
+		}
+
+		url := fmt.Sprintf("https://api.open-meteo.com/v1/forecast?latitude=%f&longitude=%f&current=temperature_2m", coords.Lat, coords.Lon)
+
+		resp, err := http.Get(url)
+		if err != nil {
+			return map[string]any{"result": fmt.Sprintf("Failed to call weather API: %v", err)}
+		}
+		defer resp.Body.Close()
+
+		if resp.StatusCode != http.StatusOK {
+			return map[string]any{"result": fmt.Sprintf("Weather API returned status: %s", resp.Status)}
+		}
+
+		body, err := io.ReadAll(resp.Body)
+		if err != nil {
+			return map[string]any{"result": fmt.Sprintf("Failed to read API response: %v", err)}
+		}
+
+		var weatherData MeteoResponse
+		if err := json.Unmarshal(body, &weatherData); err != nil {
+			return map[string]any{"result": fmt.Sprintf("Failed to parse weather JSON: %v", err)}
+		}
+
+		result := fmt.Sprintf("The current temperature in %s is %.1f°C.", args.City, weatherData.Current.Temperature)
+		return map[string]any{"result": result}
 	}
 
 	getCapitalCity := func(ctx tool.Context, args getCapitalCityArgs) map[string]any {
@@ -92,30 +145,45 @@ func main() {
 	listOfCountriesTool, err := functiontool.New(
 		functiontool.Config{
 			Name: "get_list_of_countries",
-			Description: "Retrieves the list of countries which can retrieve the capitals and the population number.",
+			//		Description: "Retrieves the list of countries which can retrieve the capitals and the population number.",
+			Description: "Retrieves the list of countries for which we can provide the capital, population, and temperature.",
 		},
 		getListOfCountries,
 	)
 
 	populationTool, err := functiontool.New(
 		functiontool.Config{
-			Name: "get_population_country",
+			Name:        "get_population_country",
 			Description: "Retrieves the population number for a given country.",
 		},
 		getPopulationCountry,
 	)
 
+	temperatureTool, err := functiontool.New(
+		functiontool.Config{
+			Name:        "get_temperature_for_capital",
+			Description: "Retrieves the current temperature for a given capital city.",
+		},
+		getTemperature,
+	)
+	if err != nil {
+		log.Fatal(err)
+	}
+
 	agent, err := llmagent.New(llmagent.Config{
-		Name:        "capital_agent",
-		Model:       model,
-		// Description: "Answers user questions about the capital city of a given country.",
-		Description: "Answers user questions about the capital city and the population number of a given country.",
-		// Instruction: "You are an agent that provides the capital city of a country... (previous instruction text)",
-		Instruction: "You are an agent that provides the capital city and the population of a country... (previous instruction text)",
-		Tools:       []tool.Tool{
+		Name:  "capital_agent",
+		Model: model,
+		// // Description: "Answers user questions about the capital city of a given country.",
+		// Description: "Answers user questions about the capital city and the population number of a given country.",
+		// // Instruction: "You are an agent that provides the capital city of a country... (previous instruction text)",
+		// Instruction: "You are an agent that provides the capital city and the population of a country... (previous instruction text)",
+		Description: "Answers user questions about the capital city, population, and current temperature of a given country/city.",
+		Instruction: "You are an agent that provides the capital city, population, and current temperature of a country. Use the available tools to find the information.",
+		Tools: []tool.Tool{
 			capitalTool,
 			populationTool,
 			listOfCountriesTool,
+			temperatureTool,
 		},
 	})
 
